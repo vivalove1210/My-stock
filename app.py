@@ -8,7 +8,7 @@ from datetime import datetime, timedelta
 
 # --- 網頁設定 ---
 st.set_page_config(page_title="高手指標回測系統", layout="wide")
-st.title("🛡️ 終極全能版 - 股價 + 成交量 + 指標同步顯示")
+st.title("🛡️ 終極全能版 - 股價 + 成交量 + 指標同步顯示 (修正版)")
 
 # --- 側邊欄：全域設定 ---
 st.sidebar.header("1. 設定標的與資金")
@@ -137,16 +137,21 @@ if run_btn:
     try:
         with st.spinner('AI 正在構建三層圖表數據...'):
             stock = yf.Ticker(ticker)
-            df = stock.history(start=start_date, end=end_date)
+
+            # --- 關鍵修正：解決 yfinance 少抓一天的問題 ---
+            # 讓 end_date 自動 +1 天，確保包含使用者選擇的那一天
+            end_date_plus = end_date + timedelta(days=1)
+
+            df = stock.history(start=start_date, end=end_date_plus)
             df.index = df.index.tz_localize(None)
 
             if df.empty:
-                st.error("❌ 無法抓取數據")
+                st.error("❌ 無法抓取數據 (可能是假日、代碼錯誤或尚未開盤)")
             else:
                 data = df[['Open', 'High', 'Low', 'Close', 'Volume']].copy()
                 data['Signal'] = 0
 
-                # 預先計算所有可能的指標 (方便畫圖)
+                # 預先計算所有可能的指標
                 if "ADX" in strategy_type:
                     data['ADX'] = calculate_adx(data, 14)
                 if "MACD" in strategy_type:
@@ -160,12 +165,8 @@ if run_btn:
                     data['SuperTrend'] = st_line
 
                     if "ADX" in strategy_type:
-                        # 計算 ADX 是否正在上升 (今天 > 昨天)
-                        data['ADX_Rising'] = data['ADX'] > data['ADX'].shift(1)
-
-                        # 新邏輯：SuperTrend 多頭 + ADX > 門檻 + ADX 正在變大
-                        condition = (st_trend == 1) & (data['ADX'] > adx_threshold) & (data['ADX_Rising'])
-
+                        # 邏輯：SuperTrend 多頭 + ADX > 門檻
+                        condition = (st_trend == 1) & (data['ADX'] > adx_threshold)
                         data.loc[condition, 'Signal'] = 1
                     else:
                         data.loc[st_trend == 1, 'Signal'] = 1
@@ -182,12 +183,10 @@ if run_btn:
                 data['Strategy_Ret'] = data['Close'].pct_change() * data['Signal'].shift(1)
                 data['Strategy_Cum'] = (1 + data['Strategy_Ret']).cumprod() * initial_capital
 
-                # --- 建立 3 層圖表 (Subplots) ---
-                # 判斷是否需要第三層 (是否有指標)
+                # --- 建立 3 層圖表 ---
                 has_indicator = "ADX" in strategy_type or "MACD" in strategy_type or "RSI" in strategy_type
 
                 if has_indicator:
-                    # 3 列: 股價(50%), 成交量(20%), 指標(30%)
                     fig = make_subplots(
                         rows=3, cols=1,
                         shared_xaxes=True,
@@ -196,7 +195,6 @@ if run_btn:
                         subplot_titles=(f"股價 ({ticker})", "成交量", "技術指標")
                     )
                 else:
-                    # 2 列: 股價(70%), 成交量(30%) - 適用於無指標模式(如純 SuperTrend)
                     fig = make_subplots(
                         rows=2, cols=1,
                         shared_xaxes=True,
@@ -205,7 +203,7 @@ if run_btn:
                         subplot_titles=(f"股價 ({ticker})", "成交量")
                     )
 
-                # --- 第一層：主圖 (股價) ---
+                # --- 第一層：主圖 ---
                 fig.add_trace(go.Scatter(x=data.index, y=data['Close'], name='股價', line=dict(color='gray', width=1)),
                               row=1, col=1)
 
@@ -220,13 +218,12 @@ if run_btn:
                 fig.add_trace(go.Scatter(x=sell.index, y=sell['Close'], mode='markers', name='賣出',
                                          marker=dict(color='green', symbol='triangle-down', size=15)), row=1, col=1)
 
-                # --- 第二層：成交量 (Volume) ---
-                # 顏色邏輯：收盤 >= 開盤 (紅), 收盤 < 開盤 (綠)
+                # --- 第二層：成交量 ---
                 vol_colors = ['red' if c >= o else 'green' for c, o in zip(data['Close'], data['Open'])]
                 fig.add_trace(go.Bar(x=data.index, y=data['Volume'], name='成交量', marker_color=vol_colors), row=2,
                               col=1)
 
-                # --- 第三層：技術指標 (如果有的話) ---
+                # --- 第三層：指標 ---
                 if has_indicator:
                     if "ADX" in strategy_type:
                         fig.add_trace(go.Scatter(x=data.index, y=data['ADX'], name='ADX', line=dict(color='purple')),
@@ -241,7 +238,6 @@ if run_btn:
                         fig.update_yaxes(range=[0, 100], row=3, col=1)
 
                     elif "MACD" in strategy_type:
-                        # MACD 柱狀體
                         colors = ['red' if v >= 0 else 'green' for v in (data['MACD'] - data['Signal_Line'])]
                         fig.add_trace(go.Bar(x=data.index, y=data['MACD'] - data['Signal_Line'], name='MACD柱',
                                              marker_color=colors), row=3, col=1)
